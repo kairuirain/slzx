@@ -1,0 +1,12 @@
+{
+  "name": "slzx-file-system",
+  "version": "1.0.0",
+  "description": "四川省双流中学初2024级7班班委会文件管理系统",
+  "main": "src/index.js",
+  "scripts": {
+    "generate": "node scripts/generate-manifest.js",
+    "deploy": "npm run generate && wrangler deploy"
+  },
+  "author": "Class Committee",
+  "license": "MIT"
+}
