@@ -208,12 +208,127 @@ class DeployWorker(QThread):
         self.log_signal.emit(msg)
 
 
-class DeployLogWindow(QMainWindow):
-    """独立的部署日志窗口"""
+class GitWorker(QThread):
+    """后台 Git 提交推送线程（实时输出）"""
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool, str)
+    need_commit_msg = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, commit_msg: str = ""):
+        super().__init__()
+        self.commit_msg = commit_msg
+
+    def run(self):
+        self._log("══════════════════════════════════")
+        self._log("  Git 提交 & 推送日志")
+        self._log("══════════════════════════════════")
+        self._log("")
+        self._log(f"  远程仓库: origin")
+        self._log(f"  分支: main")
+        self._log("")
+
+        try:
+            # 步骤1: git add .
+            self._log("──── 第 1 步：git add . ────")
+            proc = subprocess.Popen(
+                "git add .",
+                cwd=str(BASE_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                shell=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            for line in proc.stdout:
+                line = line.rstrip("\n\r")
+                if line.strip():
+                    self._log(f"  {line}")
+            proc.wait(timeout=60)
+            if proc.returncode != 0:
+                self._log(f"❌ git add 失败 (退出码: {proc.returncode})")
+                self.finished_signal.emit(False, "git add 失败")
+                return
+            self._log("✅ 暂存完成")
+            self._log("")
+
+            # 步骤2: git commit
+            self._log("──── 第 2 步：git commit ────")
+            self._log(f"> git commit -m \"{self.commit_msg}\"")
+            proc = subprocess.Popen(
+                f'git commit -m "{self.commit_msg}"',
+                cwd=str(BASE_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                shell=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            for line in proc.stdout:
+                line = line.rstrip("\n\r")
+                if line.strip():
+                    self._log(f"  {line}")
+            proc.wait(timeout=60)
+            if proc.returncode != 0:
+                # "nothing to commit" 不算失败
+                self._log("ℹ️ 没有需要提交的更改（可能已是最新）")
+            else:
+                self._log("✅ 提交完成")
+            self._log("")
+
+            # 步骤3: git push
+            self._log("──── 第 3 步：git push ────")
+            self._log("> git push")
+            proc = subprocess.Popen(
+                "git push",
+                cwd=str(BASE_DIR),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                shell=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+            push_output = []
+            for line in proc.stdout:
+                line = line.rstrip("\n\r")
+                if line.strip():
+                    self._log(f"  {line}")
+                    push_output.append(line)
+            proc.wait(timeout=120)
+
+            self._log("")
+            self._log("──────────────────────────────")
+
+            if proc.returncode == 0:
+                self._log("✅ Git 提交与推送成功！")
+                self.finished_signal.emit(True, "Git 提交与推送成功！")
+            else:
+                self._log(f"❌ git push 失败 (退出码: {proc.returncode})")
+                self.finished_signal.emit(False, "git push 失败，请检查远程仓库权限")
+
+        except subprocess.TimeoutExpired:
+            self._log("❌ 操作超时")
+            self.finished_signal.emit(False, "Git 操作超时")
+        except FileNotFoundError:
+            self._log("❌ 未找到 git 命令，请确保已安装 Git")
+            self.finished_signal.emit(False, "未找到 git 命令")
+        except Exception as e:
+            self._log(f"❌ 操作出错: {str(e)}")
+            self.finished_signal.emit(False, f"Git 操作出错: {str(e)}")
+
+    def _log(self, msg: str):
+        print(msg)
+        self.log_signal.emit(msg)
+
+
+class DeployLogWindow(QMainWindow):
+    """独立的部署/操作日志窗口"""
+
+    def __init__(self, parent=None, title="操作日志"):
         super().__init__(parent)
-        self.setWindowTitle("部署日志 — Cloudflare Workers")
+        self.setWindowTitle(title)
         self.resize(750, 520)
         self.setMinimumSize(500, 350)
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -493,6 +608,12 @@ class FileManagerWindow(QMainWindow):
         self.lbl_count.setStyleSheet("color: #7f8c8d; font-size: 13px;")
         btn_layout.addWidget(self.lbl_count)
 
+        self.btn_git = QPushButton("📤 提交并推送")
+        self.btn_git.setStyleSheet(self._btn_style("#8e44ad", "#6c3483"))
+        self.btn_git.clicked.connect(self._on_git_push)
+        self.btn_git.setMinimumHeight(36)
+        btn_layout.addWidget(self.btn_git)
+
         self.btn_deploy = QPushButton("🚀 部署到 Cloudflare")
         self.btn_deploy.setStyleSheet(self._btn_style("#1a5276", "#0d344a"))
         self.btn_deploy.clicked.connect(self._on_deploy)
@@ -695,7 +816,7 @@ class FileManagerWindow(QMainWindow):
         self._load_data()
 
         # 打开日志窗口
-        self.log_window = DeployLogWindow(self)
+        self.log_window = DeployLogWindow(self, title="部署日志 — Cloudflare Workers")
         self.log_window.show()
 
         self.btn_deploy.setEnabled(False)
@@ -717,6 +838,63 @@ class FileManagerWindow(QMainWindow):
 
         if hasattr(self, 'log_window') and self.log_window:
             self.log_window.set_finished(success)
+
+    # ── Git 提交与推送 ──
+
+    def _on_git_push(self):
+        """Git 提交并推送到远程仓库"""
+        # 弹出提交信息输入框
+        from PyQt5.QtWidgets import QInputDialog
+        commit_msg, ok = QInputDialog.getText(
+            self, "提交信息",
+            "请输入本次提交的描述信息：",
+            text="更新文件"
+        )
+        if not ok or not commit_msg.strip():
+            return
+
+        commit_msg = commit_msg.strip()
+
+        reply = QMessageBox.question(
+            self, "确认提交",
+            f"即将执行以下操作：\n\n"
+            f"  1. git add .\n"
+            f"  2. git commit -m \"{commit_msg}\"\n"
+            f"  3. git push\n\n"
+            f"远程仓库: origin/main\n\n"
+            f"继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 先确保清单是最新的
+        self._load_data()
+
+        # 打开日志窗口
+        self.git_log_window = DeployLogWindow(self, title="Git 提交日志")
+        self.git_log_window.show()
+
+        self.btn_git.setEnabled(False)
+        self.btn_git.setText("⏳ 推送中...")
+        self.progress.setRange(0, 0)
+        self.progress.show()
+        self.status_bar.showMessage("正在提交到 Git...")
+
+        self.git_worker = GitWorker(commit_msg)
+        self.git_worker.log_signal.connect(self.git_log_window.append_log)
+        self.git_worker.finished_signal.connect(self._on_git_finished)
+        self.git_worker.start()
+
+    def _on_git_finished(self, success: bool, message: str):
+        self.btn_git.setEnabled(True)
+        self.btn_git.setText("📤 提交并推送")
+        self.progress.hide()
+        self.status_bar.showMessage(message)
+
+        if hasattr(self, 'git_log_window') and self.git_log_window:
+            self.git_log_window.set_finished(success)
 
 
 # ==================== 入口 ====================
