@@ -418,6 +418,48 @@ function getHTML() {
       overflow: auto;
     }
 
+    .docx-preview {
+      width: 100%;
+      max-height: 70vh;
+      overflow: auto;
+      padding: 32px 40px;
+      background: #fff;
+      font-size: 0.95rem;
+      line-height: 1.8;
+      color: #333;
+    }
+
+    .docx-preview h1 { font-size: 1.6rem; margin: 0.8em 0 0.4em; color: #1a3a4a; }
+    .docx-preview h2 { font-size: 1.35rem; margin: 0.7em 0 0.35em; color: #1a3a4a; }
+    .docx-preview h3 { font-size: 1.15rem; margin: 0.6em 0 0.3em; color: #1a3a4a; }
+    .docx-preview h4, .docx-preview h5, .docx-preview h6 { margin: 0.5em 0 0.25em; color: #1a3a4a; }
+    .docx-preview p { margin: 0.5em 0; }
+    .docx-preview table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1em 0;
+      font-size: 0.9rem;
+    }
+    .docx-preview table td, .docx-preview table th {
+      border: 1px solid #d5dce6;
+      padding: 8px 12px;
+      text-align: left;
+    }
+    .docx-preview table th { background: #eaf2f8; font-weight: 600; }
+    .docx-preview ul, .docx-preview ol { margin: 0.5em 0; padding-left: 2em; }
+    .docx-preview li { margin: 0.2em 0; }
+    .docx-preview img { max-width: 100%; border-radius: 6px; }
+
+    .docx-warnings {
+      margin-top: 16px;
+      padding: 8px 16px;
+      background: #fef9e7;
+      border-left: 3px solid #f1c40f;
+      color: #7d6608;
+      font-size: 0.82rem;
+      border-radius: 0 6px 6px 0;
+    }
+
     .modal-footer {
       padding: 12px 24px;
       border-top: 1px solid var(--border);
@@ -534,6 +576,7 @@ function getHTML() {
       }
     }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
 </head>
 <body>
 
@@ -604,7 +647,7 @@ function getHTML() {
     const FILE_TYPES = {
       pdf:   { icon: 'PDF',  cls: 'pdf',  previewable: true },
       txt:   { icon: 'TXT',  cls: 'txt',  previewable: true },
-      docx:  { icon: 'DOC',  cls: 'docx', previewable: false },
+      docx:  { icon: 'DOC',  cls: 'docx', previewable: true },
       doc:   { icon: 'DOC',  cls: 'doc',  previewable: false },
       xlsx:  { icon: 'XLS',  cls: 'xlsx', previewable: false },
       xls:   { icon: 'XLS',  cls: 'xls',  previewable: false },
@@ -734,6 +777,16 @@ function getHTML() {
           if (!resp.ok) throw new Error('加载失败');
           const text = await resp.text();
           body.innerHTML = \`<pre>\${escapeHtml(text)}</pre>\`;
+        } else if (type === 'docx') {
+          const resp = await fetch(path);
+          if (!resp.ok) throw new Error('加载失败');
+          const arrayBuffer = await resp.arrayBuffer();
+          const result = await mammoth.convertToHtml({ arrayBuffer });
+          body.innerHTML = \`
+            <div class="docx-preview">
+              \${result.value}
+              \${result.messages.length ? '<div class="docx-warnings">⚠ 部分内容格式可能无法完全保留</div>' : ''}
+            </div>\`;
         } else if (type === 'pdf') {
           body.innerHTML = \`<iframe src="\${path}#toolbar=1&navpanes=1" allowfullscreen></iframe>\`;
         } else if (['jpg','jpeg','png','gif','webp'].includes(type)) {
