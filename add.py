@@ -122,6 +122,306 @@ def save_notices(data: dict):
     )
 
 
+# ==================== 智能提交信息生成 ====================
+
+def get_staged_diff() -> dict:
+    """获取暂存区的 diff 摘要，返回 {stat: str, files: list}"""
+    result = {"stat": "", "files": [], "changed_notices": False,
+              "changed_manifest": False, "changed_code": False}
+    try:
+        # 获取文件变更摘要
+        proc = subprocess.run(
+            "git diff --staged --stat", cwd=str(BASE_DIR),
+            capture_output=True, text=True, shell=True, timeout=30,
+            encoding="utf-8", errors="replace"
+        )
+        result["stat"] = proc.stdout.strip()
+
+        # 获取文件变更列表
+        proc2 = subprocess.run(
+            "git diff --staged --name-status", cwd=str(BASE_DIR),
+            capture_output=True, text=True, shell=True, timeout=30,
+            encoding="utf-8", errors="replace"
+        )
+        for line in proc2.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                status, filename = parts[0].strip(), parts[1].strip()
+                result["files"].append({"status": status, "name": filename})
+                # 分类
+                if "notices.json" in filename:
+                    result["changed_notices"] = True
+                elif "manifest.json" in filename:
+                    result["changed_manifest"] = True
+                elif filename.endswith((".js", ".py", ".toml", ".json", ".css", ".html")):
+                    result["changed_code"] = True
+    except Exception:
+        pass
+    return result
+
+
+def generate_commit_message(diff_data: dict) -> str:
+    """根据 diff 数据智能生成提交信息"""
+    files = diff_data.get("files", [])
+    if not files:
+        return "更新文件与通知"
+
+    added = []
+    modified = []
+    deleted = []
+    notice_files = []
+    code_files = []
+
+    for f in files:
+        name = f["name"]
+        status = f["status"]
+        basename = name.split("/")[-1] if "/" in name else name
+
+        if "notices.json" in name:
+            notice_files.append(basename)
+        elif basename.endswith((".js", ".py", ".toml", ".json", ".bat")):
+            if status == "A":
+                added.append(basename)
+            elif status == "D":
+                deleted.append(basename)
+            else:
+                code_files.append(basename)
+        elif basename.startswith("."):
+            continue  # 忽略隐藏文件
+        elif status == "A":
+            # 提取文件名主体（去掉扩展名）
+            stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+            added.append(stem)
+        elif status == "D":
+            stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+            deleted.append(stem)
+        else:
+            stem = basename.rsplit(".", 1)[0] if "." in basename else basename
+            modified.append(stem)
+
+    parts = []
+
+    # 通知变更
+    if diff_data["changed_notices"] or notice_files:
+        parts.append("更新通知")
+
+    # 文件变更
+    file_changes = []
+    if added:
+        names = _smart_join(added[:4])
+        suffix = "等" if len(added) > 4 else ""
+        file_changes.append(f"新增: {names}{suffix}")
+    if deleted:
+        names = _smart_join(deleted[:4])
+        suffix = "等" if len(deleted) > 4 else ""
+        file_changes.append(f"移除: {names}{suffix}")
+    if modified:
+        names = _smart_join(modified[:4])
+        suffix = "等" if len(modified) > 4 else ""
+        file_changes.append(f"更新: {names}{suffix}")
+
+    # 代码变更
+    if code_files and not (added or deleted or modified):
+        names = _smart_join(code_files[:4])
+        suffix = "等" if len(code_files) > 4 else ""
+        parts.append(f"更新代码: {names}{suffix}")
+
+    if file_changes:
+        parts.append("；".join(file_changes))
+
+    # 如果只有代码文件变更且没有其他分类
+    if diff_data["changed_code"] and not file_changes and not parts:
+        parts.append("更新系统代码")
+
+    if not parts:
+        parts.append("更新文件")
+
+    return "；".join(parts) if len(parts) > 1 else parts[0]
+
+
+def _smart_join(names: list) -> str:
+    """智能拼接名称列表"""
+    if len(names) <= 2:
+        return "、".join(names)
+    return "、".join(names)
+
+
+# ==================== 提交对话框 ====================
+
+class CommitDialog(QDialog):
+    """独立的提交确认窗口，展示 diff 摘要和智能生成的提交信息"""
+
+    commit_confirmed = pyqtSignal(str)  # 发送最终提交信息
+
+    def __init__(self, suggested_msg: str, diff_stat: str, file_list: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("提交代码变更 — Git Commit")
+        self.resize(720, 560)
+        self.setMinimumSize(550, 420)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setModal(True)
+
+        self.suggested_msg = suggested_msg
+        self.diff_stat = diff_stat
+        self.file_list = file_list
+
+        self._build_ui()
+        self._center()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        # 标题
+        title = QLabel("📤 提交代码变更")
+        title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        title.setStyleSheet("color: #1a5276;")
+        layout.addWidget(title)
+
+        # 变更摘要
+        summary_group = QGroupBox("变更摘要")
+        summary_group.setStyleSheet("""
+            QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #e1e8f0; border-radius: 8px; margin-top: 8px; padding-top: 16px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
+        """)
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.setContentsMargins(10, 12, 10, 10)
+
+        # 文件列表
+        if self.file_list:
+            file_text = self._format_file_list()
+            file_label = QLabel(file_text)
+            file_label.setFont(QFont("Consolas", 10))
+            file_label.setStyleSheet("color: #2c3e50; background: #f8f9fb; padding: 8px 12px; border-radius: 4px;")
+            file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            file_label.setWordWrap(True)
+            summary_layout.addWidget(file_label)
+
+        # diff 统计
+        if self.diff_stat:
+            stat_text = QPlainTextEdit()
+            stat_text.setReadOnly(True)
+            stat_text.setFont(QFont("Consolas", 9))
+            stat_text.setMaximumHeight(100)
+            stat_text.setStyleSheet("""
+                QPlainTextEdit { background: #1a1a2e; color: #a0d2db; border: 1px solid #2d2d44; border-radius: 6px; padding: 8px; }
+            """)
+            stat_text.setPlainText(self.diff_stat)
+            summary_layout.addWidget(stat_text)
+
+        layout.addWidget(summary_group)
+
+        # 提交信息
+        msg_group = QGroupBox("提交信息")
+        msg_group.setStyleSheet("""
+            QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #e1e8f0; border-radius: 8px; margin-top: 8px; padding-top: 16px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
+        """)
+        msg_layout = QVBoxLayout(msg_group)
+        msg_layout.setContentsMargins(10, 12, 10, 10)
+
+        # 提示标签
+        hint_layout = QHBoxLayout()
+        hint_icon = QLabel("💡")
+        hint_label = QLabel("已根据文件变更智能生成提交信息，您可以修改后确认提交")
+        hint_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+        hint_layout.addWidget(hint_icon)
+        hint_layout.addWidget(hint_label)
+        hint_layout.addStretch()
+        msg_layout.addLayout(hint_layout)
+
+        # 编辑框
+        self.msg_edit = QTextEdit()
+        self.msg_edit.setPlainText(self.suggested_msg)
+        self.msg_edit.setFont(QFont("Microsoft YaHei", 11))
+        self.msg_edit.setMinimumHeight(80)
+        self.msg_edit.setMaximumHeight(160)
+        self.msg_edit.setStyleSheet("""
+            QTextEdit { border: 2px solid #2980b9; border-radius: 6px; padding: 10px; background: #fafbfc; }
+            QTextEdit:focus { border-color: #1a5276; }
+        """)
+        msg_layout.addWidget(self.msg_edit)
+
+        # 操作提示
+        ops_hint = QLabel("将会执行：git add . → git commit → git push  (远程仓库: origin/main)")
+        ops_hint.setStyleSheet("color: #95a5a6; font-size: 11px; padding-left: 4px;")
+        msg_layout.addWidget(ops_hint)
+
+        layout.addWidget(msg_group)
+
+        # 按钮栏
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        self.btn_reset = QPushButton("🔄 重置为推荐")
+        self.btn_reset.setStyleSheet(self._btn_style("#95a5a6", "#7f8c8d"))
+        self.btn_reset.clicked.connect(lambda: self.msg_edit.setPlainText(self.suggested_msg))
+        btn_layout.addWidget(self.btn_reset)
+
+        btn_layout.addStretch()
+
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setStyleSheet(self._btn_style("#bdc3c7", "#95a5a6"))
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(self.btn_cancel)
+
+        self.btn_commit = QPushButton("✅ 确认提交并推送")
+        self.btn_commit.setStyleSheet("""
+            QPushButton {
+                background: #2980b9; color: white; border: none; border-radius: 6px;
+                padding: 10px 24px; font-size: 14px; font-weight: bold;
+                font-family: "Microsoft YaHei", sans-serif;
+            }
+            QPushButton:hover { background: #1a5276; }
+        """)
+        self.btn_commit.clicked.connect(self._on_confirm)
+        btn_layout.addWidget(self.btn_commit)
+
+        layout.addLayout(btn_layout)
+
+    def _format_file_list(self) -> str:
+        """格式化文件列表"""
+        lines = []
+        status_map = {"A": "➕ 新增", "M": "✏️ 修改", "D": "🗑 删除",
+                      "R": "🔄 重命名", "C": "📋 复制", "T": "📝 类型变更"}
+        for f in self.file_list:
+            s = status_map.get(f["status"], f["status"])
+            lines.append(f"  {s}  {f['name']}")
+        return "\n".join(lines)
+
+    def _on_confirm(self):
+        msg = self.msg_edit.toPlainText().strip()
+        if not msg:
+            QMessageBox.warning(self, "提示", "请输入提交信息。")
+            return
+        self.accept()
+        self.commit_confirmed.emit(msg)
+
+    def _center(self):
+        try:
+            screen = QApplication.desktop().screenGeometry()
+            self.move(
+                (screen.width() - self.width()) // 2,
+                (screen.height() - self.height()) // 2
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _btn_style(bg, hover_bg):
+        return f"""
+            QPushButton {{
+                background: {bg}; color: white; border: none; border-radius: 6px;
+                padding: 8px 20px; font-size: 13px; font-weight: bold;
+                font-family: "Microsoft YaHei", sans-serif;
+            }}
+            QPushButton:hover {{ background: {hover_bg}; }}
+        """
+
+
 # ==================== PyQt5 界面 ====================
 
 try:
@@ -131,7 +431,8 @@ try:
         QLabel, QStatusBar, QMessageBox, QSplitter,
         QAbstractItemView, QMenu, QFileDialog, QFrame,
         QTextEdit, QLineEdit, QCheckBox, QTabWidget, QGroupBox,
-        QFormLayout, QInputDialog, QProgressBar,
+        QFormLayout, QInputDialog, QProgressBar, QDialog, QDialogButtonBox,
+        QPlainTextEdit,
     )
     from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
     from PyQt5.QtGui import QFont, QColor, QPalette, QDragEnterEvent, QDropEvent
@@ -931,26 +1232,38 @@ class AdminWindow(QMainWindow):
     # ==================== Git 提交与推送 ====================
 
     def _on_git_push(self):
-        commit_msg, ok = QInputDialog.getText(
-            self, "提交信息", "请输入本次提交的描述信息：", text="更新文件与通知"
-        )
-        if not ok or not commit_msg.strip():
-            return
-
-        commit_msg = commit_msg.strip()
-        reply = QMessageBox.question(
-            self, "确认提交",
-            f"即将执行以下操作：\n\n  1. git add .\n  2. git commit -m \"{commit_msg}\"\n  3. git push\n\n远程仓库: origin/main\n\n继续？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        # 保存通知
+        """打开独立的提交确认窗口，支持智能提交信息"""
+        # 保存通知和刷新清单
         self._notice_save_to_file()
-        # 刷新清单
         self._load_file_data()
 
+        # git add 暂存所有更改
+        self.status_bar.showMessage("正在分析文件变更...")
+        try:
+            subprocess.run("git add .", cwd=str(BASE_DIR), shell=True,
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
+
+        # 获取 diff 并生成智能提交信息
+        diff_data = get_staged_diff()
+        suggested_msg = generate_commit_message(diff_data)
+
+        # 打开提交对话框
+        dialog = CommitDialog(
+            suggested_msg=suggested_msg,
+            diff_stat=diff_data.get("stat", ""),
+            file_list=diff_data.get("files", []),
+            parent=self
+        )
+
+        if dialog.exec_() != QDialog.Accepted:
+            self.status_bar.showMessage("已取消提交")
+            return
+
+        commit_msg = dialog.msg_edit.toPlainText().strip()
+
+        # 打开日志窗口并开始提交
         self.log_window = LogWindow(self, title="Git 提交日志")
         self.log_window.show()
 
