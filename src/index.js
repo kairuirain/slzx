@@ -577,7 +577,7 @@ function renderHTML() {
     function truncateText(text, len) {
       if (!text) return '';
       // Strip markdown
-      const plain = text.replace(/[#*_~`>\\-\\[\\]\\(\\)!]/g, '').trim();
+      const plain = text.replace(/[]#*_~\`>()![-]/g, '').trim();
       return plain.length > len ? plain.substring(0, len) + '...' : plain;
     }
 
