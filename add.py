@@ -903,7 +903,7 @@ class UploadWindow(QMainWindow):
 
         self.btn_website = QPushButton("🌐 访问网站")
         self.btn_website.setStyleSheet(_btn_style_s("#e67e22", "#d35400"))
-        self.btn_website.clicked.connect(lambda: (webbrowser.open("https://slzx.skying.dpdns.org"), None)[1])
+        self.btn_website.clicked.connect(lambda: (webbrowser.open("https://slzx.skyxing.dpdns.org"), None)[1])
         self.btn_website.setMinimumHeight(36)
         layout.addWidget(self.btn_website)
 
