@@ -16,7 +16,7 @@ if (!fs.existsSync(fileDir)) {
 }
 
 // Read all files, filter by supported extensions
-const supportedExts = ['.txt', '.pdf', '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.mp3', '.zip'];
+const supportedExts = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.mp4', '.mp3', '.zip'];
 const files = fs.readdirSync(fileDir).filter(f => {
   const ext = path.extname(f).toLowerCase();
   return supportedExts.includes(ext) && !f.startsWith('.') && !f.startsWith('_');
