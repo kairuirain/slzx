@@ -442,6 +442,173 @@ except ImportError:
     sys.exit(1)
 
 
+# ==================== 提交对话框 ====================
+
+class CommitDialog(QDialog):
+    """独立的提交确认窗口，展示 diff 摘要和智能生成的提交信息"""
+
+    commit_confirmed = pyqtSignal(str)
+
+    def __init__(self, suggested_msg: str, diff_stat: str, file_list: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("提交代码变更 — Git Commit")
+        self.resize(720, 560)
+        self.setMinimumSize(550, 420)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setModal(True)
+
+        self.suggested_msg = suggested_msg
+        self.diff_stat = diff_stat
+        self.file_list = file_list
+
+        self._build_ui()
+        self._center()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        title = QLabel("📤 提交代码变更")
+        title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        title.setStyleSheet("color: #1a5276;")
+        layout.addWidget(title)
+
+        # 变更摘要
+        summary_group = QGroupBox("变更摘要")
+        summary_group.setStyleSheet("""
+            QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #e1e8f0; border-radius: 8px; margin-top: 8px; padding-top: 16px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
+        """)
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.setContentsMargins(10, 12, 10, 10)
+
+        if self.file_list:
+            file_text = self._format_file_list()
+            file_label = QLabel(file_text)
+            file_label.setFont(QFont("Consolas", 10))
+            file_label.setStyleSheet("color: #2c3e50; background: #f8f9fb; padding: 8px 12px; border-radius: 4px;")
+            file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            file_label.setWordWrap(True)
+            summary_layout.addWidget(file_label)
+
+        if self.diff_stat:
+            stat_text = QPlainTextEdit()
+            stat_text.setReadOnly(True)
+            stat_text.setFont(QFont("Consolas", 9))
+            stat_text.setMaximumHeight(100)
+            stat_text.setStyleSheet("""
+                QPlainTextEdit { background: #1a1a2e; color: #a0d2db; border: 1px solid #2d2d44; border-radius: 6px; padding: 8px; }
+            """)
+            stat_text.setPlainText(self.diff_stat)
+            summary_layout.addWidget(stat_text)
+
+        layout.addWidget(summary_group)
+
+        # 提交信息
+        msg_group = QGroupBox("提交信息")
+        msg_group.setStyleSheet("""
+            QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #e1e8f0; border-radius: 8px; margin-top: 8px; padding-top: 16px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
+        """)
+        msg_layout = QVBoxLayout(msg_group)
+        msg_layout.setContentsMargins(10, 12, 10, 10)
+
+        hint_layout = QHBoxLayout()
+        hint_icon = QLabel("💡")
+        hint_label = QLabel("已根据文件变更智能生成提交信息，您可以修改后确认提交")
+        hint_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+        hint_layout.addWidget(hint_icon)
+        hint_layout.addWidget(hint_label)
+        hint_layout.addStretch()
+        msg_layout.addLayout(hint_layout)
+
+        self.msg_edit = QTextEdit()
+        self.msg_edit.setPlainText(self.suggested_msg)
+        self.msg_edit.setFont(QFont("Microsoft YaHei", 11))
+        self.msg_edit.setMinimumHeight(80)
+        self.msg_edit.setMaximumHeight(160)
+        self.msg_edit.setStyleSheet("""
+            QTextEdit { border: 2px solid #2980b9; border-radius: 6px; padding: 10px; background: #fafbfc; }
+            QTextEdit:focus { border-color: #1a5276; }
+        """)
+        msg_layout.addWidget(self.msg_edit)
+
+        ops_hint = QLabel("将会执行：git add . → git commit → git push  (远程仓库: origin/main)")
+        ops_hint.setStyleSheet("color: #95a5a6; font-size: 11px; padding-left: 4px;")
+        msg_layout.addWidget(ops_hint)
+
+        layout.addWidget(msg_group)
+
+        # 按钮栏
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        self.btn_reset = QPushButton("🔄 重置为推荐")
+        self.btn_reset.setStyleSheet(self._btn_style("#95a5a6", "#7f8c8d"))
+        self.btn_reset.clicked.connect(lambda: self.msg_edit.setPlainText(self.suggested_msg))
+        btn_layout.addWidget(self.btn_reset)
+
+        btn_layout.addStretch()
+
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setStyleSheet(self._btn_style("#bdc3c7", "#95a5a6"))
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(self.btn_cancel)
+
+        self.btn_commit = QPushButton("✅ 确认提交并推送")
+        self.btn_commit.setStyleSheet("""
+            QPushButton {
+                background: #2980b9; color: white; border: none; border-radius: 6px;
+                padding: 10px 24px; font-size: 14px; font-weight: bold;
+                font-family: "Microsoft YaHei", sans-serif;
+            }
+            QPushButton:hover { background: #1a5276; }
+        """)
+        self.btn_commit.clicked.connect(self._on_confirm)
+        btn_layout.addWidget(self.btn_commit)
+
+        layout.addLayout(btn_layout)
+
+    def _format_file_list(self) -> str:
+        lines = []
+        status_map = {"A": "➕ 新增", "M": "✏️ 修改", "D": "🗑 删除",
+                      "R": "🔄 重命名", "C": "📋 复制", "T": "📝 类型变更"}
+        for f in self.file_list:
+            s = status_map.get(f["status"], f["status"])
+            lines.append(f"  {s}  {f['name']}")
+        return "\n".join(lines)
+
+    def _on_confirm(self):
+        msg = self.msg_edit.toPlainText().strip()
+        if not msg:
+            QMessageBox.warning(self, "提示", "请输入提交信息。")
+            return
+        self.accept()
+        self.commit_confirmed.emit(msg)
+
+    def _center(self):
+        try:
+            screen = QApplication.desktop().screenGeometry()
+            self.move(
+                (screen.width() - self.width()) // 2,
+                (screen.height() - self.height()) // 2
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _btn_style(bg, hover_bg):
+        return f"""
+            QPushButton {{
+                background: {bg}; color: white; border: none; border-radius: 6px;
+                padding: 8px 20px; font-size: 13px; font-weight: bold;
+                font-family: "Microsoft YaHei", sans-serif;
+            }}
+            QPushButton:hover {{ background: {hover_bg}; }}
+        """
+
+
 # ==================== 后台线程 ====================
 
 class DeployWorker(QThread):
