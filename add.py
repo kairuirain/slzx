@@ -12,14 +12,16 @@
   2. 将文件拖拽到图标上自动导入文件管理（支持多文件）
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import json
 import shutil
 import subprocess
+import sys
 import urllib.parse
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 # ==================== 配置 ====================
 BASE_DIR = Path(__file__).resolve().parent
@@ -80,8 +82,8 @@ def delete_file_from_public(filename: str) -> bool:
     return False
 
 
-def generate_manifest() -> list:
-    file_list = []
+def generate_manifest() -> list[dict[str, Any]]:
+    file_list: list[dict[str, Any]] = []
     if FILE_DIR.exists():
         for f in sorted(FILE_DIR.iterdir()):
             if not f.is_file():
@@ -106,7 +108,7 @@ def generate_manifest() -> list:
     return file_list
 
 
-def load_notices() -> dict:
+def load_notices() -> dict[str, Any]:
     if NOTICES_PATH.exists():
         try:
             return json.loads(NOTICES_PATH.read_text(encoding="utf-8"))
@@ -115,7 +117,7 @@ def load_notices() -> dict:
     return {"notices": []}
 
 
-def save_notices(data: dict):
+def save_notices(data: dict[str, Any]) -> None:
     NOTICES_PATH.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8"
@@ -124,9 +126,9 @@ def save_notices(data: dict):
 
 # ==================== 智能提交信息生成 ====================
 
-def get_staged_diff() -> dict:
+def get_staged_diff() -> dict[str, Any]:
     """获取暂存区的 diff 摘要，返回 {stat: str, files: list}"""
-    result = {"stat": "", "files": [], "changed_notices": False,
+    result: dict[str, Any] = {"stat": "", "files": [], "changed_notices": False,
               "changed_manifest": False, "changed_code": False}
     try:
         # 获取文件变更摘要
@@ -162,7 +164,7 @@ def get_staged_diff() -> dict:
     return result
 
 
-def generate_commit_message(diff_data: dict) -> str:
+def generate_commit_message(diff_data: dict[str, Any]) -> str:
     """根据 diff 数据智能生成提交信息"""
     files = diff_data.get("files", [])
     if not files:
@@ -241,185 +243,11 @@ def generate_commit_message(diff_data: dict) -> str:
     return "；".join(parts) if len(parts) > 1 else parts[0]
 
 
-def _smart_join(names: list) -> str:
+def _smart_join(names: list[str]) -> str:
     """智能拼接名称列表"""
     if len(names) <= 2:
         return "、".join(names)
     return "、".join(names)
-
-
-# ==================== 提交对话框 ====================
-
-class CommitDialog(QDialog):
-    """独立的提交确认窗口，展示 diff 摘要和智能生成的提交信息"""
-
-    commit_confirmed = pyqtSignal(str)  # 发送最终提交信息
-
-    def __init__(self, suggested_msg: str, diff_stat: str, file_list: list, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("提交代码变更 — Git Commit")
-        self.resize(720, 560)
-        self.setMinimumSize(550, 420)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.setModal(True)
-
-        self.suggested_msg = suggested_msg
-        self.diff_stat = diff_stat
-        self.file_list = file_list
-
-        self._build_ui()
-        self._center()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-
-        # 标题
-        title = QLabel("📤 提交代码变更")
-        title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
-        title.setStyleSheet("color: #1a5276;")
-        layout.addWidget(title)
-
-        # 变更摘要
-        summary_group = QGroupBox("变更摘要")
-        summary_group.setStyleSheet("""
-            QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #e1e8f0; border-radius: 8px; margin-top: 8px; padding-top: 16px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
-        """)
-        summary_layout = QVBoxLayout(summary_group)
-        summary_layout.setContentsMargins(10, 12, 10, 10)
-
-        # 文件列表
-        if self.file_list:
-            file_text = self._format_file_list()
-            file_label = QLabel(file_text)
-            file_label.setFont(QFont("Consolas", 10))
-            file_label.setStyleSheet("color: #2c3e50; background: #f8f9fb; padding: 8px 12px; border-radius: 4px;")
-            file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            file_label.setWordWrap(True)
-            summary_layout.addWidget(file_label)
-
-        # diff 统计
-        if self.diff_stat:
-            stat_text = QPlainTextEdit()
-            stat_text.setReadOnly(True)
-            stat_text.setFont(QFont("Consolas", 9))
-            stat_text.setMaximumHeight(100)
-            stat_text.setStyleSheet("""
-                QPlainTextEdit { background: #1a1a2e; color: #a0d2db; border: 1px solid #2d2d44; border-radius: 6px; padding: 8px; }
-            """)
-            stat_text.setPlainText(self.diff_stat)
-            summary_layout.addWidget(stat_text)
-
-        layout.addWidget(summary_group)
-
-        # 提交信息
-        msg_group = QGroupBox("提交信息")
-        msg_group.setStyleSheet("""
-            QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #e1e8f0; border-radius: 8px; margin-top: 8px; padding-top: 16px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
-        """)
-        msg_layout = QVBoxLayout(msg_group)
-        msg_layout.setContentsMargins(10, 12, 10, 10)
-
-        # 提示标签
-        hint_layout = QHBoxLayout()
-        hint_icon = QLabel("💡")
-        hint_label = QLabel("已根据文件变更智能生成提交信息，您可以修改后确认提交")
-        hint_label.setStyleSheet("color: #7f8c8d; font-size: 12px;")
-        hint_layout.addWidget(hint_icon)
-        hint_layout.addWidget(hint_label)
-        hint_layout.addStretch()
-        msg_layout.addLayout(hint_layout)
-
-        # 编辑框
-        self.msg_edit = QTextEdit()
-        self.msg_edit.setPlainText(self.suggested_msg)
-        self.msg_edit.setFont(QFont("Microsoft YaHei", 11))
-        self.msg_edit.setMinimumHeight(80)
-        self.msg_edit.setMaximumHeight(160)
-        self.msg_edit.setStyleSheet("""
-            QTextEdit { border: 2px solid #2980b9; border-radius: 6px; padding: 10px; background: #fafbfc; }
-            QTextEdit:focus { border-color: #1a5276; }
-        """)
-        msg_layout.addWidget(self.msg_edit)
-
-        # 操作提示
-        ops_hint = QLabel("将会执行：git add . → git commit → git push  (远程仓库: origin/main)")
-        ops_hint.setStyleSheet("color: #95a5a6; font-size: 11px; padding-left: 4px;")
-        msg_layout.addWidget(ops_hint)
-
-        layout.addWidget(msg_group)
-
-        # 按钮栏
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
-
-        self.btn_reset = QPushButton("🔄 重置为推荐")
-        self.btn_reset.setStyleSheet(self._btn_style("#95a5a6", "#7f8c8d"))
-        self.btn_reset.clicked.connect(lambda: self.msg_edit.setPlainText(self.suggested_msg))
-        btn_layout.addWidget(self.btn_reset)
-
-        btn_layout.addStretch()
-
-        self.btn_cancel = QPushButton("取消")
-        self.btn_cancel.setStyleSheet(self._btn_style("#bdc3c7", "#95a5a6"))
-        self.btn_cancel.clicked.connect(self.reject)
-        btn_layout.addWidget(self.btn_cancel)
-
-        self.btn_commit = QPushButton("✅ 确认提交并推送")
-        self.btn_commit.setStyleSheet("""
-            QPushButton {
-                background: #2980b9; color: white; border: none; border-radius: 6px;
-                padding: 10px 24px; font-size: 14px; font-weight: bold;
-                font-family: "Microsoft YaHei", sans-serif;
-            }
-            QPushButton:hover { background: #1a5276; }
-        """)
-        self.btn_commit.clicked.connect(self._on_confirm)
-        btn_layout.addWidget(self.btn_commit)
-
-        layout.addLayout(btn_layout)
-
-    def _format_file_list(self) -> str:
-        """格式化文件列表"""
-        lines = []
-        status_map = {"A": "➕ 新增", "M": "✏️ 修改", "D": "🗑 删除",
-                      "R": "🔄 重命名", "C": "📋 复制", "T": "📝 类型变更"}
-        for f in self.file_list:
-            s = status_map.get(f["status"], f["status"])
-            lines.append(f"  {s}  {f['name']}")
-        return "\n".join(lines)
-
-    def _on_confirm(self):
-        msg = self.msg_edit.toPlainText().strip()
-        if not msg:
-            QMessageBox.warning(self, "提示", "请输入提交信息。")
-            return
-        self.accept()
-        self.commit_confirmed.emit(msg)
-
-    def _center(self):
-        try:
-            screen = QApplication.desktop().screenGeometry()
-            self.move(
-                (screen.width() - self.width()) // 2,
-                (screen.height() - self.height()) // 2
-            )
-        except Exception:
-            pass
-
-    @staticmethod
-    def _btn_style(bg, hover_bg):
-        return f"""
-            QPushButton {{
-                background: {bg}; color: white; border: none; border-radius: 6px;
-                padding: 8px 20px; font-size: 13px; font-weight: bold;
-                font-family: "Microsoft YaHei", sans-serif;
-            }}
-            QPushButton:hover {{ background: {hover_bg}; }}
-        """
 
 
 # ==================== PyQt5 界面 ====================
@@ -429,14 +257,13 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
         QLabel, QStatusBar, QMessageBox, QSplitter,
-        QAbstractItemView, QMenu, QFileDialog, QFrame,
+        QAbstractItemView, QFileDialog, QFrame,
         QTextEdit, QLineEdit, QCheckBox, QTabWidget, QGroupBox,
-        QFormLayout, QInputDialog, QProgressBar, QDialog, QDialogButtonBox,
+        QProgressBar, QDialog,
         QPlainTextEdit,
     )
     from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
     from PyQt5.QtGui import QFont, QColor, QPalette, QDragEnterEvent, QDropEvent
-    from PyQt5.QtWidgets import QDesktopWidget
 except ImportError:
     print("请先安装 PyQt5：pip install PyQt5")
     sys.exit(1)
@@ -449,12 +276,20 @@ class CommitDialog(QDialog):
 
     commit_confirmed = pyqtSignal(str)
 
-    def __init__(self, suggested_msg: str, diff_stat: str, file_list: list, parent=None):
+    suggested_msg: str
+    diff_stat: str
+    file_list: list[dict[str, Any]]
+    msg_edit: QTextEdit
+    btn_reset: QPushButton
+    btn_cancel: QPushButton
+    btn_commit: QPushButton
+
+    def __init__(self, suggested_msg: str, diff_stat: str, file_list: list[dict[str, Any]], parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("提交代码变更 — Git Commit")
         self.resize(720, 560)
         self.setMinimumSize(550, 420)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setWindowFlags(self.windowFlags() & ~int(Qt.WindowType.WindowContextHelpButtonHint))  # pyright: ignore[reportArgumentType]
         self.setModal(True)
 
         self.suggested_msg = suggested_msg
@@ -488,7 +323,7 @@ class CommitDialog(QDialog):
             file_label = QLabel(file_text)
             file_label.setFont(QFont("Consolas", 10))
             file_label.setStyleSheet("color: #2c3e50; background: #f8f9fb; padding: 8px 12px; border-radius: 4px;")
-            file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            file_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             file_label.setWordWrap(True)
             summary_layout.addWidget(file_label)
 
@@ -589,7 +424,10 @@ class CommitDialog(QDialog):
 
     def _center(self):
         try:
-            screen = QApplication.desktop().screenGeometry()
+            desktop = QApplication.desktop()
+            if desktop is None:
+                return
+            screen = desktop.screenGeometry()
             self.move(
                 (screen.width() - self.width()) // 2,
                 (screen.height() - self.height()) // 2
@@ -598,7 +436,7 @@ class CommitDialog(QDialog):
             pass
 
     @staticmethod
-    def _btn_style(bg, hover_bg):
+    def _btn_style(bg: str, hover_bg: str) -> str:
         return f"""
             QPushButton {{
                 background: {bg}; color: white; border: none; border-radius: 6px;
@@ -612,10 +450,10 @@ class CommitDialog(QDialog):
 # ==================== 后台线程 ====================
 
 class DeployWorker(QThread):
-    log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool, str)
+    log_signal: pyqtSignal = pyqtSignal(str)
+    finished_signal: pyqtSignal = pyqtSignal(bool, str)
 
-    def run(self):
+    def run(self) -> None:  # type: ignore[reportImplicitOverride]
         self._log("══════════════════════════════════")
         self._log("  Cloudflare Workers 部署日志")
         self._log("══════════════════════════════════")
@@ -633,8 +471,9 @@ class DeployWorker(QThread):
                 errors="replace",
                 bufsize=1,
             )
-            output_lines = []
-            deploy_url = None
+            output_lines: list[str] = []
+            deploy_url: str | None = None
+            assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.rstrip("\n\r")
                 output_lines.append(line)
@@ -669,14 +508,15 @@ class DeployWorker(QThread):
 
 
 class GitWorker(QThread):
-    log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool, str)
+    log_signal: pyqtSignal = pyqtSignal(str)
+    finished_signal: pyqtSignal = pyqtSignal(bool, str)
+    commit_msg: str
 
     def __init__(self, commit_msg: str = ""):
         super().__init__()
         self.commit_msg = commit_msg
 
-    def run(self):
+    def run(self) -> None:  # type: ignore[reportImplicitOverride]
         self._log("══════════════════════════════════")
         self._log("  Git 提交 & 推送日志")
         self._log("══════════════════════════════════")
@@ -690,6 +530,7 @@ class GitWorker(QThread):
             proc = subprocess.Popen("git add .", cwd=str(BASE_DIR), stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, shell=True, encoding="utf-8",
                                      errors="replace", bufsize=1)
+            assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.rstrip("\n\r")
                 if line.strip():
@@ -707,6 +548,7 @@ class GitWorker(QThread):
             proc = subprocess.Popen(f'git commit -m "{self.commit_msg}"', cwd=str(BASE_DIR),
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True,
                                      encoding="utf-8", errors="replace", bufsize=1)
+            assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.rstrip("\n\r")
                 if line.strip():
@@ -723,6 +565,7 @@ class GitWorker(QThread):
             proc = subprocess.Popen("git push", cwd=str(BASE_DIR), stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, shell=True, encoding="utf-8",
                                      errors="replace", bufsize=1)
+            assert proc.stdout is not None
             for line in proc.stdout:
                 line = line.rstrip("\n\r")
                 if line.strip():
@@ -753,13 +596,16 @@ class GitWorker(QThread):
 
 class LogWindow(QMainWindow):
     """独立的操作日志窗口"""
+    log_edit: QTextEdit
+    lbl_status: QLabel
+    btn_close: QPushButton
 
-    def __init__(self, parent=None, title="操作日志"):
+    def __init__(self, parent: QWidget | None = None, title: str = "操作日志"):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(750, 520)
         self.setMinimumSize(500, 350)
-        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -794,13 +640,15 @@ class LogWindow(QMainWindow):
             QPushButton:hover { background: #4d4d7c; }
             QPushButton:disabled { background: #2a2a3a; color: #5a5a7a; }
         """)
-        self.btn_close.clicked.connect(self.close)
+        self.btn_close.clicked.connect(lambda: (self.close(), None)[1])
         btn_layout.addWidget(self.btn_close)
         layout.addLayout(btn_layout)
 
         try:
-            screen = QApplication.desktop().screenGeometry()
-            self.move((screen.width() - self.width()) // 2, (screen.height() - self.height()) // 2)
+            desktop = QApplication.desktop()
+            if desktop is not None:
+                screen = desktop.screenGeometry()
+                self.move((screen.width() - self.width()) // 2, (screen.height() - self.height()) // 2)
         except Exception:
             pass
 
@@ -813,7 +661,8 @@ class LogWindow(QMainWindow):
         elif msg.startswith(">"): color = "#ffab40"
         self.log_edit.append(f'<span style="color:{color};">{self._escape(msg)}</span>')
         bar = self.log_edit.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        if bar is not None:
+            bar.setValue(bar.maximum())
 
     def set_finished(self, success: bool):
         self.btn_close.setEnabled(True)
@@ -833,29 +682,36 @@ class LogWindow(QMainWindow):
 
 class DropFrame(QFrame):
     """支持拖放文件的容器"""
-    files_dropped = pyqtSignal(list)
+    files_dropped: pyqtSignal = pyqtSignal(list)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setAcceptDrops(True)
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setFrameShadow(QFrame.Sunken)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFrameShadow(QFrame.Shadow.Sunken)
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
+    def dragEnterEvent(self, a0: QDragEnterEvent | None) -> None:  # type: ignore[override]
+        if a0 is None:
+            return
+        mime = a0.mimeData()
+        if mime is not None and mime.hasUrls():
+            a0.acceptProposedAction()
             self.setStyleSheet("DropFrame { border: 2px dashed #2980b9; background: #eaf2f8; }")
 
-    def dragLeaveEvent(self, event):
+    def dragLeaveEvent(self, a0: object) -> None:  # type: ignore[override]
         self.setStyleSheet("")
 
-    def dropEvent(self, event: QDropEvent):
+    def dropEvent(self, a0: QDropEvent | None) -> None:  # type: ignore[override]
+        if a0 is None:
+            return
         self.setStyleSheet("")
-        paths = []
-        for url in event.mimeData().urls():
-            p = url.toLocalFile()
-            if p:
-                paths.append(p)
+        paths: list[str] = []
+        mime = a0.mimeData()
+        if mime is not None:
+            for url in mime.urls():
+                p = url.toLocalFile()
+                if p:
+                    paths.append(p)
         if paths:
             self.files_dropped.emit(paths)
 
@@ -863,14 +719,20 @@ class DropFrame(QFrame):
 # ==================== 主窗口 ====================
 
 class AdminWindow(QMainWindow):
-    def __init__(self, init_files: list = None):
+    _manifest: list[dict[str, Any]]
+    _notices_data: dict[str, Any]
+    _editing_notice_id: str | None
+
+    def __init__(self, init_files: list[str] | None = None):
         super().__init__()
         self.setWindowTitle("四川省双流中学 初2024级7班 · 后台管理工具")
         self.resize(950, 680)
         self.setMinimumSize(750, 500)
         try:
-            screen = QApplication.desktop().screenGeometry()
-            self.move((screen.width() - self.width()) // 2, (screen.height() - self.height()) // 2)
+            desktop = QApplication.desktop()
+            if desktop is not None:
+                screen = desktop.screenGeometry()
+                self.move((screen.width() - self.width()) // 2, (screen.height() - self.height()) // 2)
         except Exception:
             pass
 
@@ -896,7 +758,7 @@ class AdminWindow(QMainWindow):
         # 标题
         title = QLabel("⚙️ 班委会后台管理工具")
         title.setFont(QFont("Microsoft YaHei", 15, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("color: #1a5276; padding: 6px;")
         root.addWidget(title)
 
@@ -965,7 +827,7 @@ class AdminWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         # 分割区域
-        splitter = QSplitter(Qt.Vertical)
+        splitter = QSplitter(Qt.Orientation.Vertical)
 
         # 通知列表表格
         self.notice_table = QTableWidget()
@@ -975,17 +837,21 @@ class AdminWindow(QMainWindow):
         self.notice_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.notice_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.notice_table.setAlternatingRowColors(True)
-        self.notice_table.horizontalHeader().setStretchLastSection(True)
-        self.notice_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-        self.notice_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.notice_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
-        self.notice_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
-        self.notice_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
+        h_header = self.notice_table.horizontalHeader()
+        assert h_header is not None
+        h_header.setStretchLastSection(True)
+        h_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        h_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        h_header.setSectionResizeMode(2, QHeaderView.Fixed)
+        h_header.setSectionResizeMode(3, QHeaderView.Fixed)
+        h_header.setSectionResizeMode(4, QHeaderView.Fixed)
         self.notice_table.setColumnWidth(0, 50)
         self.notice_table.setColumnWidth(2, 100)
         self.notice_table.setColumnWidth(3, 110)
         self.notice_table.setColumnWidth(4, 50)
-        self.notice_table.verticalHeader().setDefaultSectionSize(36)
+        v_header = self.notice_table.verticalHeader()
+        assert v_header is not None
+        v_header.setDefaultSectionSize(36)
         self.notice_table.setStyleSheet("""
             QTableWidget { border: 1px solid #e1e8f0; border-radius: 6px; gridline-color: #f0f0f0; font-size: 13px; }
             QTableWidget::item { padding: 2px 6px; }
@@ -1067,12 +933,12 @@ class AdminWindow(QMainWindow):
 
         # 提示标签
         hint = QLabel("拖拽 Word / PDF / TXT / Markdown 文件到此标签页  或  点击下方按钮选择文件")
-        hint.setAlignment(Qt.AlignCenter)
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet("color: #7f8c8d; font-size: 13px; margin-bottom: 2px;")
         layout.addWidget(hint)
 
         # 拖放区域 + 表格
-        splitter = QSplitter(Qt.Vertical)
+        splitter = QSplitter(Qt.Orientation.Vertical)
 
         self.file_drop_frame = DropFrame()
         self.file_drop_frame.setMinimumHeight(60)
@@ -1087,13 +953,17 @@ class AdminWindow(QMainWindow):
         self.file_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.file_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.file_table.setAlternatingRowColors(True)
-        self.file_table.horizontalHeader().setStretchLastSection(True)
-        self.file_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-        self.file_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.file_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
+        fh_header = self.file_table.horizontalHeader()
+        assert fh_header is not None
+        fh_header.setStretchLastSection(True)
+        fh_header.setSectionResizeMode(0, QHeaderView.Fixed)
+        fh_header.setSectionResizeMode(1, QHeaderView.Stretch)
+        fh_header.setSectionResizeMode(2, QHeaderView.Fixed)
         self.file_table.setColumnWidth(0, 50)
         self.file_table.setColumnWidth(2, 70)
-        self.file_table.verticalHeader().setDefaultSectionSize(40)
+        fv_header = self.file_table.verticalHeader()
+        assert fv_header is not None
+        fv_header.setDefaultSectionSize(40)
         self.file_table.setStyleSheet("""
             QTableWidget { border: 1px solid #e1e8f0; border-radius: 6px; gridline-color: #f0f0f0; font-size: 13px; }
             QTableWidget::item { padding: 4px 8px; }
@@ -1152,7 +1022,7 @@ class AdminWindow(QMainWindow):
     # ==================== 样式辅助 ====================
 
     @staticmethod
-    def _btn_style(bg, hover_bg):
+    def _btn_style(bg: str, hover_bg: str) -> str:
         return f"""
             QPushButton {{
                 background: {bg}; color: white; border: none; border-radius: 6px;
@@ -1188,7 +1058,7 @@ class AdminWindow(QMainWindow):
         self.notice_table.setRowCount(len(notices))
         for row, n in enumerate(notices):
             pinned_item = QTableWidgetItem("📌" if n.get("pinned") else "")
-            pinned_item.setTextAlignment(Qt.AlignCenter)
+            pinned_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             pinned_item.setFont(QFont("Segoe UI Emoji", 12))
             self.notice_table.setItem(row, 0, pinned_item)
 
@@ -1197,15 +1067,15 @@ class AdminWindow(QMainWindow):
             self.notice_table.setItem(row, 1, title_item)
 
             author_item = QTableWidgetItem(n.get("author", ""))
-            author_item.setTextAlignment(Qt.AlignCenter)
+            author_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.notice_table.setItem(row, 2, author_item)
 
             date_item = QTableWidgetItem(n.get("date", ""))
-            date_item.setTextAlignment(Qt.AlignCenter)
+            date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.notice_table.setItem(row, 3, date_item)
 
             id_item = QTableWidgetItem(str(n.get("id", "")))
-            id_item.setTextAlignment(Qt.AlignCenter)
+            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.notice_table.setItem(row, 4, id_item)
 
     # ==================== 通知管理 — 操作 ====================
@@ -1310,7 +1180,7 @@ class AdminWindow(QMainWindow):
         self.file_table.setRowCount(len(files))
         for row, f in enumerate(files):
             icon_item = QTableWidgetItem(get_file_icon(f["type"]))
-            icon_item.setTextAlignment(Qt.AlignCenter)
+            icon_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             icon_item.setFont(QFont("Segoe UI Emoji", 14))
             self.file_table.setItem(row, 0, icon_item)
 
@@ -1319,7 +1189,7 @@ class AdminWindow(QMainWindow):
             self.file_table.setItem(row, 1, name_item)
 
             type_item = QTableWidgetItem(f" .{f['type']} ")
-            type_item.setTextAlignment(Qt.AlignCenter)
+            type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.file_table.setItem(row, 2, type_item)
 
             op_widget = QWidget()
@@ -1339,7 +1209,7 @@ class AdminWindow(QMainWindow):
 
     # ==================== 文件管理 — 操作 ====================
 
-    def _add_files(self, path_strings: list):
+    def _add_files(self, path_strings: list[str]):
         added = 0
         skipped = []
         for p_str in path_strings:
