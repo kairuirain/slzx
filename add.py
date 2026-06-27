@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
+import webbrowser
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -259,7 +260,7 @@ try:
         QLabel, QStatusBar, QMessageBox, QSplitter,
         QAbstractItemView, QFileDialog, QFrame,
         QTextEdit, QLineEdit, QCheckBox, QTabWidget, QGroupBox,
-        QProgressBar, QDialog,
+        QProgressBar, QDialog, QRadioButton, QScrollArea,
         QPlainTextEdit,
     )
     from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
@@ -716,6 +717,578 @@ class DropFrame(QFrame):
             self.files_dropped.emit(paths)
 
 
+# ==================== 上传管理窗口 ====================
+
+class UploadWindow(QMainWindow):
+    """上传管理 — 整合 Git 提交、提交记录、版本回退、快捷跳转"""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("代码上传与版本管理")
+        self.resize(1050, 680)
+        self.setMinimumSize(850, 520)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._center()
+
+        self._current_worker: GitWorker | DeployWorker | None = None
+        self._log_window: LogWindow | None = None
+
+        self._build_ui()
+        QTimer.singleShot(100, self._refresh_history)
+
+    # ── 窗口居中 ──
+
+    def _center(self):
+        try:
+            desktop = QApplication.desktop()
+            if desktop is None:
+                return
+            screen = desktop.screenGeometry()
+            self.move(
+                (screen.width() - self.width()) // 2,
+                (screen.height() - self.height()) // 2
+            )
+        except Exception:
+            pass
+
+    # ── UI 构建 ──
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(6)
+
+        # 标题栏
+        title_bar = QHBoxLayout()
+        title = QLabel("🚀 代码上传与版本管理")
+        title.setFont(QFont("Microsoft YaHei", 15, QFont.Bold))
+        title.setStyleSheet("color: #1a5276;")
+        title_bar.addWidget(title)
+        title_bar.addStretch()
+        btn_refresh = QPushButton("🔄 刷新历史")
+        btn_refresh.setStyleSheet(_btn_style_s("#27ae60", "#1e8449"))
+        btn_refresh.clicked.connect(self._refresh_history)
+        title_bar.addWidget(btn_refresh)
+        root.addLayout(title_bar)
+
+        # 左右分割
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # ── 左侧面板（可滚动）──
+        left_scroll = _make_scroll()
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 6, 0)
+        left_layout.setSpacing(8)
+
+        self._build_commit_section(left_layout)
+        self._build_links_section(left_layout)
+        self._build_history_section(left_layout)
+        self._build_rollback_section(left_layout)
+        left_layout.addStretch()
+
+        left_scroll.setWidget(left_widget)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setMinimumWidth(400)
+        left_scroll.setMaximumWidth(550)
+        splitter.addWidget(left_scroll)
+
+        # ── 右侧面板（日志输出）──
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(6, 0, 0, 0)
+        right_layout.setSpacing(6)
+
+        log_label = QLabel("📋 操作日志")
+        log_label.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        log_label.setStyleSheet("color: #2c3e50;")
+        right_layout.addWidget(log_label)
+
+        self.log_edit = QTextEdit()
+        self.log_edit.setReadOnly(True)
+        self.log_edit.setFont(QFont("Consolas", 10))
+        self.log_edit.setStyleSheet("""
+            QTextEdit {
+                background: #1a1a2e; color: #a0d2db;
+                border: 1px solid #2d2d44; border-radius: 8px; padding: 10px;
+            }
+            QScrollBar:vertical { background: #1a1a2e; width: 10px; border-radius: 5px; }
+            QScrollBar::handle:vertical { background: #3d3d5c; border-radius: 5px; min-height: 30px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        """)
+        right_layout.addWidget(self.log_edit)
+
+        # 状态栏
+        status_row = QHBoxLayout()
+        self.lbl_status = QLabel("就绪")
+        self.lbl_status.setStyleSheet("color: #7f8c8d; font-size: 13px;")
+        status_row.addWidget(self.lbl_status)
+        status_row.addStretch()
+        self.progress = QProgressBar()
+        self.progress.setMaximumWidth(200)
+        self.progress.setMaximumHeight(16)
+        self.progress.hide()
+        status_row.addWidget(self.progress)
+        right_layout.addLayout(status_row)
+
+        splitter.addWidget(right_widget)
+        splitter.setSizes([450, 580])
+        root.addWidget(splitter)
+
+    # ── 模块 1：Git 提交 ──
+
+    def _build_commit_section(self, parent_layout: QVBoxLayout):
+        grp = _make_group("📤 Git 提交")
+        layout = QVBoxLayout(grp)
+        layout.setSpacing(6)
+
+        hint = QLabel("输入提交信息后，执行 git add . → git commit → git push")
+        hint.setStyleSheet("color: #7f8c8d; font-size: 12px; padding: 2px 0;")
+        layout.addWidget(hint)
+
+        self.msg_input = QTextEdit()
+        self.msg_input.setFont(QFont("Microsoft YaHei", 11))
+        self.msg_input.setPlaceholderText("请输入本次提交的描述信息...")
+        self.msg_input.setMaximumHeight(80)
+        self.msg_input.setStyleSheet("""
+            QTextEdit { border: 2px solid #2980b9; border-radius: 6px; padding: 8px; background: #fafbfc; }
+            QTextEdit:focus { border-color: #1a5276; }
+        """)
+        layout.addWidget(self.msg_input)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self.btn_analyze = QPushButton("🔍 智能分析")
+        self.btn_analyze.setStyleSheet(_btn_style_s("#8e44ad", "#6c3483"))
+        self.btn_analyze.clicked.connect(self._analyze_changes)
+        btn_row.addWidget(self.btn_analyze)
+
+        self.btn_save_notices = QPushButton("💾 保存通知")
+        self.btn_save_notices.setStyleSheet(_btn_style_s("#2980b9", "#1a5276"))
+        self.btn_save_notices.clicked.connect(self._save_notices_from_parent)
+        btn_row.addWidget(self.btn_save_notices)
+
+        btn_row.addStretch()
+
+        self.btn_commit_push = QPushButton("✅ 提交并推送")
+        self.btn_commit_push.setStyleSheet(_btn_style_s("#27ae60", "#1e8449"))
+        self.btn_commit_push.clicked.connect(self._on_commit_push)
+        self.btn_commit_push.setMinimumHeight(34)
+        btn_row.addWidget(self.btn_commit_push)
+
+        self.btn_deploy = QPushButton("🚀 部署到 Cloudflare")
+        self.btn_deploy.setStyleSheet(_btn_style_s("#1a5276", "#0d344a"))
+        self.btn_deploy.clicked.connect(self._on_deploy)
+        self.btn_deploy.setMinimumHeight(34)
+        btn_row.addWidget(self.btn_deploy)
+
+        layout.addLayout(btn_row)
+        parent_layout.addWidget(grp)
+
+    # ── 模块 2：快捷跳转 ──
+
+    def _build_links_section(self, parent_layout: QVBoxLayout):
+        grp = _make_group("🔗 快捷跳转")
+        layout = QHBoxLayout(grp)
+        layout.setSpacing(10)
+
+        self.btn_github = QPushButton("🐙 GitHub 仓库")
+        self.btn_github.setStyleSheet(_btn_style_s("#24292e", "#1a1d21"))
+        self.btn_github.clicked.connect(lambda: (webbrowser.open("https://github.com/skyxing/slzx.skyxing.dpdns.org"), None)[1])
+        self.btn_github.setMinimumHeight(36)
+        layout.addWidget(self.btn_github)
+
+        self.btn_website = QPushButton("🌐 访问网站")
+        self.btn_website.setStyleSheet(_btn_style_s("#e67e22", "#d35400"))
+        self.btn_website.clicked.connect(lambda: (webbrowser.open("https://slzx.skying.dpdns.org"), None)[1])
+        self.btn_website.setMinimumHeight(36)
+        layout.addWidget(self.btn_website)
+
+        parent_layout.addWidget(grp)
+
+    # ── 模块 3：提交记录 ──
+
+    def _build_history_section(self, parent_layout: QVBoxLayout):
+        grp = _make_group("📜 提交记录")
+        layout = QVBoxLayout(grp)
+        layout.setSpacing(4)
+
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(4)
+        self.history_table.setHorizontalHeaderLabels(["提交哈希", "提交信息", "作者", "日期"])
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.history_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.history_table.setAlternatingRowColors(True)
+        hh = self.history_table.horizontalHeader()
+        assert hh is not None
+        hh.setStretchLastSection(True)
+        hh.setSectionResizeMode(0, QHeaderView.Fixed)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed)
+        hh.setSectionResizeMode(3, QHeaderView.Fixed)
+        self.history_table.setColumnWidth(0, 80)
+        self.history_table.setColumnWidth(2, 80)
+        self.history_table.setColumnWidth(3, 90)
+        vh = self.history_table.verticalHeader()
+        assert vh is not None
+        vh.setDefaultSectionSize(30)
+        self.history_table.setMinimumHeight(180)
+        self.history_table.setMaximumHeight(280)
+        self.history_table.setStyleSheet("""
+            QTableWidget { border: 1px solid #e1e8f0; border-radius: 6px; gridline-color: #f0f0f0; font-size: 12px; }
+            QHeaderView::section { background: #f5f7fa; border: none; border-bottom: 2px solid #e1e8f0; padding: 4px; font-weight: bold; color: #2c3e50; }
+            QTableWidget::item:selected { background: #d4e6f1; color: #1a5276; }
+        """)
+        layout.addWidget(self.history_table)
+
+        parent_layout.addWidget(grp)
+
+    # ── 模块 4：版本回退 ──
+
+    def _build_rollback_section(self, parent_layout: QVBoxLayout):
+        grp = _make_group("⏪ 版本回退")
+        layout = QVBoxLayout(grp)
+        layout.setSpacing(6)
+
+        hint = QLabel("从上方提交记录中选择一条，选择回退方式后执行")
+        hint.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+        layout.addWidget(hint)
+
+        radio_row = QHBoxLayout()
+        radio_row.setSpacing(16)
+
+        self.radio_revert = _make_radio("安全回退 — 创建反向提交（git revert）", True)
+        radio_row.addWidget(self.radio_revert)
+
+        self.radio_reset = _make_radio("软回退 — 保留工作区变更（git reset --soft）", False)
+        radio_row.addWidget(self.radio_reset)
+        radio_row.addStretch()
+        layout.addLayout(radio_row)
+
+        btn_row = QHBoxLayout()
+        warn = QLabel("⚠️ 回退操作不可轻易撤销，请确认后再执行")
+        warn.setStyleSheet("color: #e74c3c; font-size: 12px;")
+        btn_row.addWidget(warn)
+        btn_row.addStretch()
+
+        self.btn_rollback = QPushButton("🔄 执行回退")
+        self.btn_rollback.setStyleSheet(_btn_style_s("#e74c3c", "#c0392b"))
+        self.btn_rollback.clicked.connect(self._on_rollback)
+        self.btn_rollback.setMinimumHeight(32)
+        btn_row.addWidget(self.btn_rollback)
+        layout.addLayout(btn_row)
+
+        parent_layout.addWidget(grp)
+
+    # ── 工具方法 ──
+
+    def _save_notices_from_parent(self):
+        """尝试通过父窗口保存通知"""
+        parent = self.parent()
+        if parent is not None and hasattr(parent, '_notice_save_to_file'):
+            parent._notice_save_to_file()  # pyright: ignore[reportAttributeAccessIssue]
+        if parent is not None and hasattr(parent, '_load_file_data'):
+            parent._load_file_data()  # pyright: ignore[reportAttributeAccessIssue]
+        self._append_log("✅ 通知与文件清单已保存", "#27ae60")
+
+    def _analyze_changes(self):
+        """智能分析暂存变更并生成提交信息"""
+        self._save_notices_from_parent()
+        self._append_log("🔍 正在分析文件变更...", "#ffab40")
+        try:
+            subprocess.run("git add .", cwd=str(BASE_DIR), shell=True,
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
+        diff_data = get_staged_diff()
+        suggested = generate_commit_message(diff_data)
+        self.msg_input.setPlainText(suggested)
+        files = diff_data.get("files", [])
+        if files:
+            self._append_log(f"📂 检测到 {len(files)} 个文件变更", "#a0d2db")
+            for f in files[:10]:
+                self._append_log(f"   {f['status']}\t{f['name']}", "#5a5a7a")
+        else:
+            self._append_log("ℹ️ 暂存区没有变更", "#7f8c8d")
+        self.lbl_status.setText("智能分析完成")
+
+    # ── 日志输出 ──
+
+    def _append_log(self, msg: str, color: str = "#a0d2db"):
+        self.log_edit.append(f'<span style="color:{color};">{_escape_html(msg)}</span>')
+        bar = self.log_edit.verticalScrollBar()
+        if bar is not None:
+            bar.setValue(bar.maximum())
+
+    # ── Git 提交与推送 ──
+
+    def _on_commit_push(self):
+        msg = self.msg_input.toPlainText().strip()
+        if not msg:
+            QMessageBox.warning(self, "提示", "请输入提交信息。")
+            return
+
+        self._save_notices_from_parent()
+
+        # 暂存所有更改
+        self._append_log("══════════════════════════════════", "#5a5a7a")
+        self._append_log("  Git 提交 & 推送日志", "#a0d2db")
+        self._append_log("══════════════════════════════════", "#5a5a7a")
+        self._append_log("")
+
+        self.btn_commit_push.setEnabled(False)
+        self.btn_commit_push.setText("⏳ 提交中...")
+        self.btn_deploy.setEnabled(False)
+        self.progress.setRange(0, 0)
+        self.progress.show()
+        self.lbl_status.setText("正在提交到 Git...")
+
+        self._current_worker = GitWorker(msg)
+        self._current_worker.log_signal.connect(self._append_log)
+        self._current_worker.finished_signal.connect(self._on_commit_finished)
+        self._current_worker.start()
+
+    def _on_commit_finished(self, success: bool, message: str):
+        self.btn_commit_push.setEnabled(True)
+        self.btn_commit_push.setText("✅ 提交并推送")
+        self.btn_deploy.setEnabled(True)
+        self.progress.hide()
+        self.lbl_status.setText(f"{'✅' if success else '❌'} {message}")
+        if success:
+            QTimer.singleShot(500, self._refresh_history)
+
+    # ── 部署 ──
+
+    def _on_deploy(self):
+        self._save_notices_from_parent()
+
+        reply = QMessageBox.question(
+            self, "确认部署",
+            "即将部署到 Cloudflare Workers。\n请确保已登录 Wrangler 且网络畅通。\n\n继续？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._append_log("══════════════════════════════════", "#5a5a7a")
+        self._append_log("  Cloudflare Workers 部署日志", "#a0d2db")
+        self._append_log("══════════════════════════════════", "#5a5a7a")
+        self._append_log("")
+
+        self.btn_deploy.setEnabled(False)
+        self.btn_deploy.setText("⏳ 部署中...")
+        self.btn_commit_push.setEnabled(False)
+        self.progress.setRange(0, 0)
+        self.progress.show()
+        self.lbl_status.setText("正在部署，请耐心等待...")
+
+        self._current_worker = DeployWorker()
+        self._current_worker.log_signal.connect(self._append_log)
+        self._current_worker.finished_signal.connect(self._on_deploy_finished)
+        self._current_worker.start()
+
+    def _on_deploy_finished(self, success: bool, message: str):
+        self.btn_deploy.setEnabled(True)
+        self.btn_deploy.setText("🚀 部署到 Cloudflare")
+        self.btn_commit_push.setEnabled(True)
+        self.progress.hide()
+        self.lbl_status.setText(f"{'✅' if success else '❌'} {message}")
+
+    # ── 提交记录 ──
+
+    def _refresh_history(self):
+        self.history_table.setRowCount(0)
+        self.lbl_status.setText("正在加载提交记录...")
+        try:
+            proc = subprocess.run(
+                'git log --format="%H||%s||%an||%ad" --date=short -n 50',
+                cwd=str(BASE_DIR), shell=True,
+                capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="replace"
+            )
+            lines = proc.stdout.strip().splitlines()
+            self.history_table.setRowCount(len(lines))
+            for row, line in enumerate(lines):
+                if not line.strip():
+                    continue
+                parts = line.split("||", 3)
+                if len(parts) < 4:
+                    continue
+                hsh, msg_text, author, date_str = parts
+
+                hash_item = QTableWidgetItem(hsh[:8])
+                hash_item.setFont(QFont("Consolas", 10))
+                hash_item.setForeground(QColor("#8e44ad"))
+                self.history_table.setItem(row, 0, hash_item)
+
+                msg_item = QTableWidgetItem(msg_text.strip())
+                msg_item.setToolTip(msg_text.strip())
+                self.history_table.setItem(row, 1, msg_item)
+
+                author_item = QTableWidgetItem(author.strip())
+                self.history_table.setItem(row, 2, author_item)
+
+                date_item = QTableWidgetItem(date_str.strip())
+                date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.history_table.setItem(row, 3, date_item)
+
+            self.lbl_status.setText(f"已加载 {len(lines)} 条提交记录")
+            self._append_log(f"📜 已刷新提交记录（{len(lines)} 条）", "#27ae60")
+        except Exception as e:
+            self.lbl_status.setText("加载提交记录失败")
+            self._append_log(f"❌ 获取提交记录失败: {e}", "#ff5252")
+
+    # ── 版本回退 ──
+
+    def _on_rollback(self):
+        row = self._get_selected_history_row()
+        if row < 0:
+            QMessageBox.information(self, "提示", "请先在提交记录中选择一条要回退到的提交。")
+            return
+
+        hash_item = self.history_table.item(row, 0)
+        if hash_item is None:
+            return
+        commit_hash = hash_item.text().strip()
+        msg_item = self.history_table.item(row, 1)
+        commit_msg = msg_item.text().strip() if msg_item else ""
+
+        use_revert = self.radio_revert.isChecked()
+
+        if use_revert:
+            mode_text = "git revert（创建反向提交）"
+            extra_warn = "\n此操作将创建一个新的反向提交来撤销更改，不会删除历史记录。"
+        else:
+            mode_text = "git reset --soft（软回退，保留工作区变更）"
+            extra_warn = "\n此操作将移动 HEAD 指针，但保留所有文件变更在工作区。\n回退后需要重新提交。"
+
+        reply = QMessageBox.question(
+            self, "确认回退",
+            f"确定要回退到以下提交吗？\n\n"
+            f"目标：{commit_hash}\n"
+            f"信息：{commit_msg}\n"
+            f"方式：{mode_text}{extra_warn}\n\n"
+            f"⚠️ 此操作不可轻易撤销，请确认！",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._append_log("══════════════════════════════════", "#5a5a7a")
+        self._append_log("  版本回退日志", "#ffab40")
+        self._append_log("══════════════════════════════════", "#5a5a7a")
+        self._append_log(f"  目标提交: {commit_hash}", "#a0d2db")
+
+        self.btn_rollback.setEnabled(False)
+        self.btn_commit_push.setEnabled(False)
+        self.btn_deploy.setEnabled(False)
+        self.progress.setRange(0, 0)
+        self.progress.show()
+
+        try:
+            if use_revert:
+                self._append_log(f"> git revert --no-edit {commit_hash}", "#ffab40")
+                proc = subprocess.run(
+                    f'git revert --no-edit {commit_hash}',
+                    cwd=str(BASE_DIR), shell=True,
+                    capture_output=True, text=True, timeout=60,
+                    encoding="utf-8", errors="replace"
+                )
+            else:
+                self._append_log(f"> git reset --soft {commit_hash}", "#ffab40")
+                proc = subprocess.run(
+                    f'git reset --soft {commit_hash}',
+                    cwd=str(BASE_DIR), shell=True,
+                    capture_output=True, text=True, timeout=30,
+                    encoding="utf-8", errors="replace"
+                )
+
+            if proc.stdout.strip():
+                for line in proc.stdout.strip().splitlines():
+                    self._append_log(f"  {line}", "#a0d2db")
+            if proc.stderr.strip():
+                for line in proc.stderr.strip().splitlines():
+                    self._append_log(f"  {line}", "#ffd740")
+
+            if proc.returncode == 0:
+                self._append_log("✅ 回退操作成功！", "#27ae60")
+                self.lbl_status.setText(f"回退成功 — {commit_hash}")
+                QMessageBox.information(self, "回退成功",
+                    f"已成功回退到提交 {commit_hash}。\n\n"
+                    f"{'请检查工作区状态，必要时重新提交。' if not use_revert else ''}")
+                QTimer.singleShot(500, self._refresh_history)
+            else:
+                self._append_log(f"❌ 回退失败 (退出码: {proc.returncode})", "#ff5252")
+                self.lbl_status.setText("回退失败")
+                QMessageBox.critical(self, "回退失败",
+                    f"git 操作返回错误码 {proc.returncode}。\n请检查日志了解详情。")
+        except subprocess.TimeoutExpired:
+            self._append_log("❌ 回退操作超时", "#ff5252")
+            self.lbl_status.setText("回退超时")
+            QMessageBox.critical(self, "回退超时", "git 操作超时（60秒），请重试。")
+        except Exception as e:
+            self._append_log(f"❌ 回退出错: {e}", "#ff5252")
+            self.lbl_status.setText("回退出错")
+            QMessageBox.critical(self, "回退出错", str(e))
+        finally:
+            self.btn_rollback.setEnabled(True)
+            self.btn_commit_push.setEnabled(True)
+            self.btn_deploy.setEnabled(True)
+            self.progress.hide()
+
+    def _get_selected_history_row(self) -> int:
+        rows = set(idx.row() for idx in self.history_table.selectedIndexes())
+        return list(rows)[0] if rows else -1
+
+
+# ── 辅助：小组件工厂 ──
+
+def _make_group(title: str) -> QGroupBox:
+    grp = QGroupBox(title)
+    grp.setStyleSheet("""
+        QGroupBox { font-weight: bold; color: #2c3e50; border: 1px solid #e1e8f0;
+                     border-radius: 8px; margin-top: 8px; padding-top: 16px; }
+        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
+    """)
+    return grp
+
+
+def _make_scroll() -> QScrollArea:
+    sa = QScrollArea()
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QFrame.Shape.NoFrame)
+    sa.setStyleSheet("QScrollArea { border: none; }")
+    return sa
+
+
+def _make_radio(text: str, checked: bool) -> QRadioButton:
+    rb = QRadioButton(text)
+    rb.setChecked(checked)
+    rb.setStyleSheet("font-size: 13px; color: #2c3e50; spacing: 6px;")
+    return rb
+
+
+def _btn_style_s(bg: str, hover_bg: str) -> str:
+    return f"""
+        QPushButton {{
+            background: {bg}; color: white; border: none; border-radius: 6px;
+            padding: 8px 18px; font-size: 13px; font-weight: bold;
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+        }}
+        QPushButton:hover {{ background: {hover_bg}; }}
+        QPushButton:pressed {{ background: {hover_bg}; padding: 9px 18px 7px 18px; }}
+        QPushButton:disabled {{ background: #bdc3c7; color: #ecf0f1; }}
+    """
+
+
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 # ==================== 主窗口 ====================
 
 class AdminWindow(QMainWindow):
@@ -1003,13 +1576,13 @@ class AdminWindow(QMainWindow):
         self.lbl_file_count.setStyleSheet("color: #7f8c8d; font-size: 13px;")
         btn_row.addWidget(self.lbl_file_count)
 
-        self.file_btn_git = QPushButton("📤 提交并推送")
-        self.file_btn_git.setStyleSheet(self._btn_style("#8e44ad", "#6c3483"))
-        self.file_btn_git.clicked.connect(self._on_git_push)
-        self.file_btn_git.setMinimumHeight(36)
-        btn_row.addWidget(self.file_btn_git)
+        self.file_btn_upload = QPushButton("🚀 上传管理")
+        self.file_btn_upload.setStyleSheet(self._btn_style("#8e44ad", "#6c3483"))
+        self.file_btn_upload.clicked.connect(self._open_upload_window)
+        self.file_btn_upload.setMinimumHeight(36)
+        btn_row.addWidget(self.file_btn_upload)
 
-        self.file_btn_deploy = QPushButton("🚀 部署到 Cloudflare")
+        self.file_btn_deploy = QPushButton("☁️ 快速部署")
         self.file_btn_deploy.setStyleSheet(self._btn_style("#1a5276", "#0d344a"))
         self.file_btn_deploy.clicked.connect(self._on_deploy)
         self.file_btn_deploy.setMinimumHeight(36)
@@ -1266,58 +1839,23 @@ class AdminWindow(QMainWindow):
             self._load_file_data()
             self.status_bar.showMessage(f"已删除 {len(filenames)} 个文件")
 
-    # ==================== Git 提交与推送 ====================
+    # ==================== 上传管理 ====================
 
-    def _on_git_push(self):
-        """打开独立的提交确认窗口，支持智能提交信息"""
-        # 保存通知和刷新清单
+    def _open_upload_window(self):
+        """打开上传管理独立窗口"""
         self._notice_save_to_file()
         self._load_file_data()
+        self.status_bar.showMessage("已打开上传管理窗口")
+        upload_win = UploadWindow(self)
+        upload_win.show()
 
-        # git add 暂存所有更改
-        self.status_bar.showMessage("正在分析文件变更...")
-        try:
-            subprocess.run("git add .", cwd=str(BASE_DIR), shell=True,
-                           capture_output=True, timeout=30)
-        except Exception:
-            pass
-
-        # 获取 diff 并生成智能提交信息
-        diff_data = get_staged_diff()
-        suggested_msg = generate_commit_message(diff_data)
-
-        # 打开提交对话框
-        dialog = CommitDialog(
-            suggested_msg=suggested_msg,
-            diff_stat=diff_data.get("stat", ""),
-            file_list=diff_data.get("files", []),
-            parent=self
-        )
-
-        if dialog.exec_() != QDialog.Accepted:
-            self.status_bar.showMessage("已取消提交")
-            return
-
-        commit_msg = dialog.msg_edit.toPlainText().strip()
-
-        # 打开日志窗口并开始提交
-        self.log_window = LogWindow(self, title="Git 提交日志")
-        self.log_window.show()
-
-        self.file_btn_git.setEnabled(False)
-        self.file_btn_git.setText("⏳ 推送中...")
-        self.progress.setRange(0, 0)
-        self.progress.show()
-        self.status_bar.showMessage("正在提交到 Git...")
-
-        self.git_worker = GitWorker(commit_msg)
-        self.git_worker.log_signal.connect(self.log_window.append_log)
-        self.git_worker.finished_signal.connect(self._on_git_finished)
-        self.git_worker.start()
+    def _on_git_push(self):
+        """兼容接口 — 打开上传管理窗口"""
+        self._open_upload_window()
 
     def _on_git_finished(self, success: bool, message: str):
-        self.file_btn_git.setEnabled(True)
-        self.file_btn_git.setText("📤 提交并推送")
+        self.file_btn_upload.setEnabled(True)
+        self.file_btn_upload.setText("🚀 上传管理")
         self.progress.hide()
         self.status_bar.showMessage(message)
         if hasattr(self, 'log_window') and self.log_window:
